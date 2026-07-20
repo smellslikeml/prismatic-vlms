@@ -18,6 +18,7 @@ from prismatic.models.backbones.vision import (
     ImageTransform,
     IN1KViTBackbone,
     SigLIPViTBackbone,
+    TIPSv2ViTBackbone,
     VisionBackbone,
 )
 from prismatic.models.vlms import PrismaticVLM
@@ -47,6 +48,10 @@ VISION_BACKBONES = {
     # === Fused Backbones ===
     "dinoclip-vit-l-336px": {"cls": DinoCLIPViTBackbone, "kwargs": {"default_image_size": 336}},
     "dinosiglip-vit-so-384px": {"cls": DinoSigLIPViTBackbone, "kwargs": {"default_image_size": 384}},
+
+    # === TIPSv2 Backbones (HF Hub `google/tipsv2-*`; native resolution is 448px) ===
+    "tipsv2-vit-b14": {"cls": TIPSv2ViTBackbone, "kwargs": {"default_image_size": 448}},
+    "tipsv2-vit-l14": {"cls": TIPSv2ViTBackbone, "kwargs": {"default_image_size": 448}},
 }
 
 
