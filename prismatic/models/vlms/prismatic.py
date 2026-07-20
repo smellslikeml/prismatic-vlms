@@ -26,6 +26,7 @@ from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
+from prismatic.util.visual_token_pruning import prune_visual_tokens
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -68,6 +69,9 @@ class PrismaticVLM(VLM):
 
         # Trackers
         self.vision_backbone_requires_grad = False
+
+        # Training-free visual-token pruning budget (AnchorPrune); `None` == keep all tokens (default)
+        self.visual_token_budget: Optional[int] = None
 
         # Set Module Keys =>> used in Checkpoint Saving / Model Loading
         self.all_module_keys = ["vision_backbone", "llm_backbone", "projector"]
@@ -118,6 +122,10 @@ class PrismaticVLM(VLM):
     def get_prompt_builder(self, system_prompt: Optional[str] = None) -> PromptBuilder:
         prompt_initializer: Type[PromptBuilder] = self.llm_backbone.prompt_builder_fn
         return prompt_initializer(self.model_family, system_prompt=system_prompt)
+
+    def set_visual_token_budget(self, budget: Optional[int]) -> None:
+        """Enable training-free AnchorPrune pruning to `budget` visual tokens per image (`None` disables)."""
+        self.visual_token_budget = budget
 
     def freeze_backbones(self, stage: str) -> None:
         """
@@ -314,6 +322,15 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+
+        # AnchorPrune :: training-free, query-conditioned visual-token pruning (opt-in via `visual_token_budget`)
+        if self.visual_token_budget is not None:
+            query_embeddings = self.llm_backbone.embed_input_ids(input_ids[multimodal_indices])
+            query_mask = attention_mask[multimodal_indices] if attention_mask is not None else None
+            projected_patch_embeddings = prune_visual_tokens(
+                projected_patch_embeddings, query_embeddings, self.visual_token_budget, query_mask=query_mask
+            )
+
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(

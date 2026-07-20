@@ -216,3 +216,32 @@ If you find our code or models useful in your work, please cite [our paper](http
   year = {2024},
 }
 ```
+
+---
+
+#### Efficient Inference — Visual-Token Pruning (AnchorPrune)
+
+High-resolution inputs turn into hundreds/thousands of visual tokens, many of them
+redundant for a given query. `PrismaticVLM` includes an opt-in, **training-free**
+visual-token pruner adapted from [AnchorPrune: Relevance-Anchored Contextual Expansion
+for Visual Token Pruning](https://arxiv.org/abs/2607.07033). It keeps a compact,
+protected *relevance anchor* of query-critical tokens, then fills the remaining budget
+with *importance-weighted novelty* so context expansion never displaces the anchor.
+
+Enable it by setting a per-image token budget on a loaded VLM (no retraining, no weight
+changes); pass `None` to restore the full-token path:
+
+```python
+vlm = load(model_id, hf_token=hf_token)
+
+# Keep only 160 of the projected visual tokens per image, conditioned on the query.
+vlm.set_visual_token_budget(160)
+
+# ... run `vlm.generate(...)` as usual; pruning happens inside the forward pass.
+vlm.set_visual_token_budget(None)  # disable / back to full tokens
+```
+
+The relevance signal is a parameter-free proxy (cosine similarity between projected
+visual tokens and the LLM-embedded query), substituted for the paper's
+attention-derived signal so the method requires no model modification. See
+[`prismatic/util/visual_token_pruning.py`](prismatic/util/visual_token_pruning.py).
