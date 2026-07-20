@@ -29,7 +29,7 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      - uses: remyxai/outrider@e975a5b000af9fd5cf4e210dffbc39aa8f2717e5 # v1
+      - uses: remyxai/outrider@ee309b90e3ce59f77ad40eac5cefe31a5739f108 # v1
         env:
           REMYX_API_KEY: ${{ secrets.REMYX_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
