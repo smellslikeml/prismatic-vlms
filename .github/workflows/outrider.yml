@@ -36,7 +36,7 @@ jobs:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
         with:
-          interest-id: ecd07323-c7e0-4bb3-aa07-9feab60173d8  # "training vlms" → smellslikeml/prismatic-vlms
+          interest-id: 0ca7c0e0-3c5f-4cc1-b996-2b30f862c4a9  # auto-created "prismatic-vlms" interest (provisioned via `remyxai outrider init --mode auto`)
           mode: recommend
           publish: pr
           provider: moonshot
