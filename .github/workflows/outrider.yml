@@ -3,7 +3,7 @@ name: Outrider Kimi-K3 smoke (prismatic-vlms → TIPSv2 backbone)
 # One-shot dispatch pattern (adapted from smellslikeml/ag2's
 # outrider-moonshot-refine-smoke.yml). No cron, single job, Moonshot Kimi-K3
 # routing. Interest-id resolves to the auto-created "prismatic-vlms" ResearchInterest
-# for smellslikeml/prismatic-vlms. Outrider action pinned to the arxiv-fallback fix branch (REMYX-247).
+# for smellslikeml/prismatic-vlms.
 
 on:
   workflow_dispatch:
@@ -29,7 +29,7 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      - uses: remyxai/outrider@cb037fdf34ece21d9eae92a3c32e086074a798b1 # v1
+      - uses: remyxai/outrider@v1 # v1
         env:
           REMYX_API_KEY: ${{ secrets.REMYX_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
