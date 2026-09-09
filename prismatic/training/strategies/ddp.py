@@ -11,10 +11,10 @@ from typing import Optional
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import AdamW
 from transformers.optimization import get_cosine_schedule_with_warmup
 
 from prismatic.overwatch import initialize_overwatch
+from prismatic.training.optimization import build_optimizer
 from prismatic.training.strategies.base_strategy import TrainingStrategy
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
@@ -92,7 +92,9 @@ class DDPStrategy(TrainingStrategy):
             num_warmup_steps = int(num_training_steps * self.warmup_ratio)
 
             assert self.weight_decay == 0, "DDP training does not currently support `weight_decay` > 0!"
-            self.optimizer = AdamW(trainable_params, lr=self.learning_rate, weight_decay=self.weight_decay)
+            self.optimizer = build_optimizer(
+                trainable_params, self.optimizer_type, lr=self.learning_rate, weight_decay=self.weight_decay
+            )
             self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps)
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = 0.0

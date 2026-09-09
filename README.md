@@ -216,3 +216,18 @@ If you find our code or models useful in your work, please cite [our paper](http
   year = {2024},
 }
 ```
+
+---
+
+## Memory-Efficient Training (GaLore)
+
+Training strategies accept an `optimizer_type` argument (default `"adamw"`, unchanged). Setting it to
+`"galore-adamw"` swaps in a memory-efficient optimizer that implements **Gradient Low-Rank Projection**
+(GaLore) — adapted from [*GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection*](https://arxiv.org/abs/2403.03507).
+
+Unlike LoRA, GaLore keeps training full-rank: it stores Adam's first/second-moment statistics in a
+low-rank subspace of each 2D weight's gradient (refreshed periodically via a truncated SVD), reducing
+optimizer-state memory from `O(m*n)` to `O(r*n)` per matrix. Biases, norms, and small matrices fall
+back to standard AdamW. The optimizer lives in `prismatic/training/optimization.py` and is constructed
+at the DDP/FSDP optimizer call sites via `build_optimizer(...)`. Note that projection is effective for
+unsharded parameters (e.g. DDP); under FSDP's flattened shards it gracefully falls back to AdamW.
