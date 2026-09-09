@@ -44,6 +44,7 @@ class TrainingStrategy(ABC):
         max_grad_norm: float,
         lr_scheduler_type: str,
         warmup_ratio: float,
+        optimizer_type: str = "adamw",
         enable_gradient_checkpointing: bool = True,
         enable_mixed_precision_training: bool = True,
         reduce_in_full_precision: bool = False,
@@ -63,6 +64,7 @@ class TrainingStrategy(ABC):
 
         self.learning_rate, self.weight_decay, self.max_grad_norm = learning_rate, weight_decay, max_grad_norm
         self.lr_scheduler_type, self.warmup_ratio = lr_scheduler_type, warmup_ratio
+        self.optimizer_type = optimizer_type
 
         # Generic Strategy Parameters
         self.enable_gradient_checkpointing = enable_gradient_checkpointing

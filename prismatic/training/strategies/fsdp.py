@@ -27,11 +27,11 @@ from torch.distributed.fsdp import (
     StateDictType,
 )
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.optim import AdamW
 from transformers.optimization import get_cosine_schedule_with_warmup
 
 from prismatic.models.vlms import PrismaticVLM
 from prismatic.overwatch import initialize_overwatch
+from prismatic.training.optimization import build_optimizer
 from prismatic.training.strategies.base_strategy import TrainingStrategy
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
@@ -52,6 +52,7 @@ class FSDPStrategy(TrainingStrategy):
         max_grad_norm: float,
         lr_scheduler_type: str,
         warmup_ratio: float,
+        optimizer_type: str = "adamw",
         enable_gradient_checkpointing: bool = True,
         enable_mixed_precision_training: bool = True,
         reduce_in_full_precision: bool = False,
@@ -72,6 +73,7 @@ class FSDPStrategy(TrainingStrategy):
             max_grad_norm=max_grad_norm,
             lr_scheduler_type=lr_scheduler_type,
             warmup_ratio=warmup_ratio,
+            optimizer_type=optimizer_type,
             enable_gradient_checkpointing=enable_gradient_checkpointing,
             enable_mixed_precision_training=enable_mixed_precision_training,
             reduce_in_full_precision=reduce_in_full_precision,
@@ -210,7 +212,7 @@ class FSDPStrategy(TrainingStrategy):
             groups = [{"params": decay, "weight_decay": self.weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
 
             # Create Optimizer & LR Scheduler
-            self.optimizer = AdamW(groups, lr=self.learning_rate)
+            self.optimizer = build_optimizer(groups, self.optimizer_type, lr=self.learning_rate)
             self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps)
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = 0.0
