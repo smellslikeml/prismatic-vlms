@@ -97,6 +97,28 @@ generated_text = vlm.generate(
 
 For a complete terminal-based CLI for interacting with our VLMs, check out [scripts/generate.py](scripts/generate.py). 
 
+### Visual-Token Reduction (faster inference) — adapted from [PACE](https://github.com/jjL357/PACE)
+
+`PrismaticVLM` supports optional, training-free visual-token reduction that shrinks the projected
+visual-token stream before it is concatenated into the LLM sequence, lowering time-to-first-token at a
+small quality cost. This adapts the *Extract* stage of PACE ("PACE: A Unified Condense-and-Extract
+Paradigm for Fast VLM Inference"): under a strict token budget it retains the most salient tokens
+(fine-grained detail, scored by each token's distance from the per-image mean) plus one mean-pooled
+context token (holistic context). It holds no learned parameters and is disabled by default.
+
+```python
+# Keep ~25% of the visual tokens (call before running generate/forward)
+vlm.enable_visual_token_reduction(retention_ratio=0.25)
+
+# ... run inference as usual ...
+
+vlm.disable_visual_token_reduction()  # restore the full token stream
+```
+
+The paper's *Condense* stage (pixel-space adaptive downsampling ahead of the vision encoder) and its
+LLM-attention-based token scoring are intentionally out of scope here; see
+[`prismatic/util/visual_token_reduction.py`](prismatic/util/visual_token_reduction.py) for details.
+
 ## Pretrained Models
 
 We release **all 49** VLMs trained as part of our work, with a range of different visual representations, language
