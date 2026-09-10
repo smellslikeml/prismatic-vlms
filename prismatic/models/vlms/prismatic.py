@@ -26,6 +26,7 @@ from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
+from prismatic.util.visual_token_reduction import VisualTokenReducer, build_visual_token_reducer
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -66,6 +67,9 @@ class PrismaticVLM(VLM):
         else:
             raise ValueError(f"PrismaticVLM with `{arch_specifier = }` is not supported!")
 
+        # Optional PACE-style visual-token reduction (training-free, disabled by default)
+        self.visual_token_reducer: Optional[VisualTokenReducer] = None
+
         # Trackers
         self.vision_backbone_requires_grad = False
 
@@ -80,6 +84,20 @@ class PrismaticVLM(VLM):
             token_idx_list = self.llm_backbone.tokenizer.encode(trigger_string, add_special_tokens=False)
             assert len(token_idx_list) == 1, f'String "{trigger_string}" is tokenized as more than one token!'
             self.string2idx[trigger_string] = token_idx_list[0]
+
+    def enable_visual_token_reduction(self, retention_ratio: float, keep_context: bool = True) -> None:
+        """Enable training-free PACE-style visual-token reduction for inference.
+
+        Retains only `ceil(retention_ratio * num_patches)` projected visual tokens per image
+        before they are concatenated into the LLM sequence, trading a small quality drop for
+        lower time-to-first-token. Pass `retention_ratio >= 1.0` (or call `disable_...`) to
+        turn it back into a no-op.
+        """
+        self.visual_token_reducer = build_visual_token_reducer(retention_ratio, keep_context=keep_context)
+
+    def disable_visual_token_reduction(self) -> None:
+        """Restore the full projected-token stream (no reduction)."""
+        self.visual_token_reducer = None
 
     @classmethod
     def from_pretrained(
@@ -314,6 +332,12 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+
+        # Optional PACE-style visual-token reduction :: [bsz, num_patches, dim] =>> [bsz, k, dim]
+        #   => Downstream mask/label shapes derive from `.shape[1]`, so they follow the reduced count.
+        if self.visual_token_reducer is not None:
+            projected_patch_embeddings = self.visual_token_reducer(projected_patch_embeddings)
+
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(
