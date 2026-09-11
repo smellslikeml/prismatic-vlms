@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Type, Union
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from PIL import Image
@@ -26,6 +26,7 @@ from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
+from prismatic.util.visual_token_pruning import SpatialTokenPruner
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -69,6 +70,9 @@ class PrismaticVLM(VLM):
         # Trackers
         self.vision_backbone_requires_grad = False
 
+        # Optional training-free visual-token pruner (disabled by default; see `configure_token_pruning`)
+        self.visual_token_pruner: Optional[SpatialTokenPruner] = None
+
         # Set Module Keys =>> used in Checkpoint Saving / Model Loading
         self.all_module_keys = ["vision_backbone", "llm_backbone", "projector"]
         self.trainable_module_keys = []
@@ -80,6 +84,13 @@ class PrismaticVLM(VLM):
             token_idx_list = self.llm_backbone.tokenizer.encode(trigger_string, add_special_tokens=False)
             assert len(token_idx_list) == 1, f'String "{trigger_string}" is tokenized as more than one token!'
             self.string2idx[trigger_string] = token_idx_list[0]
+
+    def configure_token_pruning(self, budget: Optional[int], region_grid: Tuple[int, int] = (2, 2)) -> None:
+        """Enable/disable training-free spatial visual-token pruning at the projector output.
+
+        `budget` is the number of visual tokens to retain per example; pass `None` to disable.
+        """
+        self.visual_token_pruner = None if budget is None else SpatialTokenPruner(budget, region_grid)
 
     @classmethod
     def from_pretrained(
@@ -314,6 +325,12 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+
+        # Optional S^2Prune-style pruning: shrink the visual-token count while preserving spatial
+        #   coverage. The reduced count flows through the mask/label/concat machinery below unchanged.
+        if self.visual_token_pruner is not None:
+            projected_patch_embeddings, _ = self.visual_token_pruner(projected_patch_embeddings)
+
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(

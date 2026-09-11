@@ -216,3 +216,30 @@ If you find our code or models useful in your work, please cite [our paper](http
   year = {2024},
 }
 ```
+
+---
+
+## Efficient Inference: Spatial Visual-Token Pruning
+
+Adapted from [S²Prune: Spatially Structured Visual Token Pruning for Multimodal Large Language
+Models](https://arxiv.org/abs/2609.01224).
+
+`PrismaticVLM` supports an optional, training-free pruning of the post-projection visual-token
+sequence that shrinks the number of visual tokens fed to the LLM while preserving spatial coverage.
+Following S²Prune, the patch grid is divided into regions, each region is guaranteed at least one
+token, and the remaining budget is distributed toward regions with richer local structure (measured
+via Laplacian variation on the projected features). It is disabled by default and adds no parameters:
+
+```python
+vlm = load(model_id, hf_token=hf_token)
+
+# Retain only 64 visual tokens per image (from e.g. 256), preserving broad spatial coverage.
+vlm.configure_token_pruning(budget=64, region_grid=(2, 2))
+
+# ... run vlm.generate(...) as usual; pass budget=None to disable.
+```
+
+This integration substitutes S²Prune's decoder-block Early Representation Change signal and
+raw-image Laplacian with parameter-free proxies computed on the projected token grid; the paper's
+benchmark/eval suite is intentionally out of scope. See
+`prismatic/util/visual_token_pruning.py`.
