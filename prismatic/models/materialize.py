@@ -12,6 +12,7 @@ from transformers import PreTrainedTokenizerBase
 from prismatic.models.backbones.llm import LLaMa2LLMBackbone, LLMBackbone, MistralLLMBackbone, PhiLLMBackbone
 from prismatic.models.backbones.vision import (
     CLIPViTBackbone,
+    ConvNeXtBackbone,
     DinoCLIPViTBackbone,
     DinoSigLIPViTBackbone,
     DinoV2ViTBackbone,
@@ -47,6 +48,10 @@ VISION_BACKBONES = {
     # === Fused Backbones ===
     "dinoclip-vit-l-336px": {"cls": DinoCLIPViTBackbone, "kwargs": {"default_image_size": 336}},
     "dinosiglip-vit-so-384px": {"cls": DinoSigLIPViTBackbone, "kwargs": {"default_image_size": 384}},
+
+    # === Hierarchical (ConvNeXt) Backbones =>> compact high-resolution visual tokens (see ConvLLaVA) ===
+    "convnext-clip-b-256px": {"cls": ConvNeXtBackbone, "kwargs": {"default_image_size": 256}},
+    "convnext-clip-l-512px": {"cls": ConvNeXtBackbone, "kwargs": {"default_image_size": 512}},
 }
 
 

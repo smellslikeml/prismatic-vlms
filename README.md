@@ -216,3 +216,20 @@ If you find our code or models useful in your work, please cite [our paper](http
   year = {2024},
 }
 ```
+
+---
+
+## Hierarchical (ConvNeXt) Vision Backbones — adapted from ConvLLaVA
+
+In addition to the ViT backbones, we support a hierarchical **ConvNeXt** visual featurizer. Because ConvNeXt reduces
+spatial resolution by 32x (vs. 16x for a `patch16` ViT), it produces ~4x fewer visual tokens at an equal input
+resolution, keeping high-resolution inputs affordable for the projector + LLM. It plugs into the standard
+`VisionBackbone` interface with no change to the projector or LLM path — select it via `--model.vision_backbone_id`:
+
++ `convnext-clip-b-256px` — CLIP-pretrained ConvNeXt-Base at 256px (64 visual tokens).
++ `convnext-clip-l-512px` — CLIP-pretrained ConvNeXt-Large at 512px (256 visual tokens).
+
+Adapted from [ConvLLaVA: Hierarchical Backbones as Visual Encoder for Large Multimodal Models](https://arxiv.org/abs/2405.15738).
+We port the paper's core hierarchical-encoder mechanism; the additional separately-pretrained 5th downsampling stage and
+the two-stage vision-encoder training recipe are out of scope (they require a pretraining loop and released ConvLLaVA
+weights).
