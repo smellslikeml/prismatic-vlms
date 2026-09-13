@@ -216,3 +216,20 @@ If you find our code or models useful in your work, please cite [our paper](http
   year = {2024},
 }
 ```
+
+---
+
+#### Connectors
+
+Beyond the default linear / MLP projectors, the connector is selected by the `arch_specifier` string on each model
+config (see [`prismatic/conf/models.py`](prismatic/conf/models.py)):
+
+- `linear`, `gelu-mlp`, `fused-gelu-mlp` — per-patch projections that preserve the patch count.
+- `resampler` — a **Query Resampler** connector (adapted from
+  [Towards Efficient Visual-Language Alignment of the Q-Former for Visual Reasoning Tasks](https://arxiv.org/abs/2410.09489)).
+  A bank of learnable query tokens cross-attends to the vision patch features, compressing a few hundred patches down to
+  a small, fixed set of LLM-dimension tokens (default 64) and shortening the sequence handed to the LLM. Only the
+  Q-Former's core mechanism (learnable queries + cross-attention + query self-attention + feed-forward) is implemented;
+  the paper's BERT text encoder and ITC/ITM/ITG contrastive objectives are omitted, so the connector trains end-to-end
+  with the standard language-modeling loss like the other projectors. Compose with the `no-align+` prefix as usual
+  (e.g. `no-align+resampler`).
