@@ -216,3 +216,26 @@ If you find our code or models useful in your work, please cite [our paper](http
   year = {2024},
 }
 ```
+
+---
+
+## Spatial Visual-Token Pruning — adapted from S²Prune
+
+For efficient inference you can prune the projected visual tokens *before* they reach the LLM backbone,
+shrinking sequence length (and KV-cache / attention cost) at `generate()` time with no retraining. The
+pruner is disabled by default; enable it on a loaded VLM:
+
+```python
+# Keep 64 of the ~256 visual tokens per image (training-free).
+vlm.enable_visual_token_pruning(keep_tokens=64)
+
+# ... generate() as usual; call vlm.disable_visual_token_pruning() to restore the full token set.
+```
+
+The selection preserves broad **spatial coverage** (at least one token per image region) while spending the
+remaining budget on structurally rich regions via **Laplacian variation** — the core idea of
+[S²Prune: Spatially Structured Visual Token Pruning for MLLMs](https://arxiv.org/abs/2609.01224). This is an
+adapted port: the paper's region-partition/coverage allocation and Laplacian-variation density adaptation
+are implemented as described, while its Early Representation Change (ERC) selector (a first-decoder-block
+forward pass) is substituted with a parameter-free Laplacian-magnitude proxy on the projected embeddings.
+See `prismatic/models/vlms/spatial_token_pruning.py`.

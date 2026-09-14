@@ -24,6 +24,7 @@ from prismatic.models.backbones.llm import LLMBackbone
 from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
+from prismatic.models.vlms.spatial_token_pruning import SpatialTokenPruner
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
 
@@ -68,6 +69,9 @@ class PrismaticVLM(VLM):
 
         # Trackers
         self.vision_backbone_requires_grad = False
+
+        # Optional training-free visual-token pruner (disabled by default; see `enable_visual_token_pruning`)
+        self.visual_token_pruner: Optional[SpatialTokenPruner] = None
 
         # Set Module Keys =>> used in Checkpoint Saving / Model Loading
         self.all_module_keys = ["vision_backbone", "llm_backbone", "projector"]
@@ -118,6 +122,18 @@ class PrismaticVLM(VLM):
     def get_prompt_builder(self, system_prompt: Optional[str] = None) -> PromptBuilder:
         prompt_initializer: Type[PromptBuilder] = self.llm_backbone.prompt_builder_fn
         return prompt_initializer(self.model_family, system_prompt=system_prompt)
+
+    def enable_visual_token_pruning(self, keep_tokens: int, region_grid: int = 2) -> None:
+        """Attach a training-free spatial visual-token pruner (S^2Prune) to shrink the visual sequence.
+
+        Retains `keep_tokens` of the projected patch embeddings per image, preserving spatial coverage
+        while spending the budget on structurally rich regions. Pass `keep_tokens >= num_patches` (or call
+        `disable_visual_token_pruning`) to no-op. Best used at inference to cut KV-cache / attention cost.
+        """
+        self.visual_token_pruner = SpatialTokenPruner(keep_tokens=keep_tokens, region_grid=region_grid)
+
+    def disable_visual_token_pruning(self) -> None:
+        self.visual_token_pruner = None
 
     def freeze_backbones(self, stage: str) -> None:
         """
@@ -314,6 +330,12 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+
+        # Optional training-free visual-token pruning :: [bsz, num_patches, d] =>> [bsz, keep_tokens, d]
+        #   => Downstream mask/label construction reads `.shape[1]`, so the reduced count stays consistent.
+        if self.visual_token_pruner is not None:
+            projected_patch_embeddings = self.visual_token_pruner(projected_patch_embeddings)
+
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(
