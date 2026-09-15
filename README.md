@@ -97,6 +97,24 @@ generated_text = vlm.generate(
 
 For a complete terminal-based CLI for interacting with our VLMs, check out [scripts/generate.py](scripts/generate.py). 
 
+### Efficient Inference — Visual Token Pruning
+
+Adapted from [S²Prune: Spatially Structured Visual Token Pruning for Multimodal Large Language Models](https://arxiv.org/abs/2609.01224).
+You can optionally prune the projected visual-token grid at inference time to cut LLM sequence length while
+preserving broad spatial coverage. The pruner guarantees at least one token per image region, then spends the
+remaining budget where local structure (Laplacian variation on the feature grid) is richest. It is training-free
+and parameter-free, so it toggles on an already-trained checkpoint without touching weights:
+
+```python
+# Keep 32 of the ~256 projected visual tokens, over a 4x4 region grid
+vlm.enable_visual_token_pruning(keep_tokens=32, num_regions_per_side=4)
+generated_text = vlm.generate(image, prompt_text, max_new_tokens=512)
+
+# Restore the full token grid
+vlm.disable_visual_token_pruning()
+```
+
+
 ## Pretrained Models
 
 We release **all 49** VLMs trained as part of our work, with a range of different visual representations, language

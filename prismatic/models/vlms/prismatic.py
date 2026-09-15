@@ -26,6 +26,7 @@ from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
+from prismatic.util.visual_token_pruning import SpatialTokenPruner
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -69,6 +70,9 @@ class PrismaticVLM(VLM):
         # Trackers
         self.vision_backbone_requires_grad = False
 
+        # Optional training-free visual-token pruner (S^2Prune); disabled unless explicitly enabled
+        self.visual_token_pruner: Optional[SpatialTokenPruner] = None
+
         # Set Module Keys =>> used in Checkpoint Saving / Model Loading
         self.all_module_keys = ["vision_backbone", "llm_backbone", "projector"]
         self.trainable_module_keys = []
@@ -80,6 +84,14 @@ class PrismaticVLM(VLM):
             token_idx_list = self.llm_backbone.tokenizer.encode(trigger_string, add_special_tokens=False)
             assert len(token_idx_list) == 1, f'String "{trigger_string}" is tokenized as more than one token!'
             self.string2idx[trigger_string] = token_idx_list[0]
+
+    def enable_visual_token_pruning(self, keep_tokens: int, num_regions_per_side: int = 4) -> None:
+        """Enable training-free S^2Prune visual-token pruning at the projector output (see visual_token_pruning)."""
+        self.visual_token_pruner = SpatialTokenPruner(keep_tokens, num_regions_per_side)
+
+    def disable_visual_token_pruning(self) -> None:
+        """Disable visual-token pruning, restoring the full projected token grid."""
+        self.visual_token_pruner = None
 
     @classmethod
     def from_pretrained(
@@ -314,6 +326,11 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+
+        # Optionally prune the visual-token grid (S^2Prune); downstream shapes derive from `.shape[1]`, so this is safe
+        if self.visual_token_pruner is not None:
+            projected_patch_embeddings = self.visual_token_pruner(projected_patch_embeddings)
+
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(
