@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Type, Union
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from PIL import Image
@@ -26,6 +26,7 @@ from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
+from prismatic.util.token_pruning import spatially_structured_prune
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -68,6 +69,10 @@ class PrismaticVLM(VLM):
 
         # Trackers
         self.vision_backbone_requires_grad = False
+
+        # Optional training-free visual-token pruning (disabled by default; see `configure_visual_token_pruning`)
+        self.visual_token_budget: Optional[int] = None
+        self.visual_token_prune_regions: Tuple[int, int] = (2, 2)
 
         # Set Module Keys =>> used in Checkpoint Saving / Model Loading
         self.all_module_keys = ["vision_backbone", "llm_backbone", "projector"]
@@ -118,6 +123,16 @@ class PrismaticVLM(VLM):
     def get_prompt_builder(self, system_prompt: Optional[str] = None) -> PromptBuilder:
         prompt_initializer: Type[PromptBuilder] = self.llm_backbone.prompt_builder_fn
         return prompt_initializer(self.model_family, system_prompt=system_prompt)
+
+    def configure_visual_token_pruning(self, budget: Optional[int], num_regions_hw: Tuple[int, int] = (2, 2)) -> None:
+        """Enable (or disable) training-free spatially structured visual-token pruning at the projector output.
+
+        Args:
+            budget: Number of visual tokens to retain per sample; `None` disables pruning (the default).
+            num_regions_hw: Coarse (rows, cols) region grid used to preserve spatial coverage during pruning.
+        """
+        self.visual_token_budget = budget
+        self.visual_token_prune_regions = num_regions_hw
 
     def freeze_backbones(self, stage: str) -> None:
         """
@@ -314,6 +329,15 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+
+        # Optional training-free visual-token pruning (no-op unless `configure_visual_token_pruning` was called)
+        if self.visual_token_budget is not None:
+            projected_patch_embeddings = spatially_structured_prune(
+                projected_patch_embeddings,
+                budget=self.visual_token_budget,
+                num_regions_hw=self.visual_token_prune_regions,
+            )
+
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(
