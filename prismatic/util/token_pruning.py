@@ -12,7 +12,8 @@ mechanism at full fidelity:
     2. Preserve spatial coverage by assigning at least one token to every region.
     3. Distribute the remaining token budget by *Laplacian variation*, giving more tokens to regions with richer
        local structure.
-    4. Select representative tokens *within* each region.
+    4. Recursively partition each region into as many non-overlapping cells as it was allocated tokens, and keep
+       one representative token per cell (spatial coverage *within* each region).
 
 Two auxiliary components of the paper are substituted with parameter-free, target-native equivalents so the method
 can run directly on `PrismaticVLM`'s projected patch embeddings without extra infrastructure:
@@ -21,8 +22,9 @@ can run directly on `PrismaticVLM`'s projected patch embeddings without extra in
       call site only the embeddings are available, and their spatial gradient is a faithful stand-in for local
       image structure.
     * The paper's Early Representation Change (ERC) signal — which requires running the first decoder block — is
-      replaced by a within-region representativeness proxy: tokens closest to their region's mean embedding are
-      kept. This approximates ERC's "pick representative tokens" objective without an extra forward pass.
+      replaced by a within-region representativeness proxy: within each cell the token closest to its region's
+      mean embedding is kept. This approximates ERC's "pick representative tokens" objective without an extra
+      forward pass.
 
 The paper's separate benchmark / evaluation framework is intentionally out of scope (that belongs downstream).
 """
@@ -43,21 +45,68 @@ def _infer_square_grid(num_tokens: int) -> Optional[Tuple[int, int]]:
     return None
 
 
-def _region_assignment(grid_hw: Tuple[int, int], num_regions_hw: Tuple[int, int]) -> Tuple[List[List[int]], int]:
-    """Map each flattened (row-major) token index to a region; return per-region token-index lists + region count."""
+Region = Tuple[int, int, int, int]
+
+
+def _region_assignment(
+    grid_hw: Tuple[int, int], num_regions_hw: Tuple[int, int]
+) -> Tuple[List[Region], List[List[int]]]:
+    """Partition the token grid into non-overlapping rectangular regions.
+
+    Returns ``(regions, region_tokens)`` where ``regions[i]`` is the ``(r0, r1, c0, c1)`` bounds of region ``i``
+    and ``region_tokens[i]`` its flattened (row-major) token indices.
+    """
     height, width = grid_hw
     n_rows = max(1, min(num_regions_hw[0], height))
     n_cols = max(1, min(num_regions_hw[1], width))
-    num_regions = n_rows * n_cols
 
-    region_tokens: List[List[int]] = [[] for _ in range(num_regions)]
-    for row in range(height):
-        region_row = (row * n_rows) // height
-        for col in range(width):
-            region_col = (col * n_cols) // width
-            region_id = region_row * n_cols + region_col
-            region_tokens[region_id].append(row * width + col)
-    return region_tokens, num_regions
+    def _edges(extent: int, parts: int) -> List[int]:
+        # Ceil boundaries so each region is a contiguous rectangle covering >= 1 row/col.
+        return [-(-(k * extent) // parts) for k in range(parts + 1)]
+
+    row_edges = _edges(height, n_rows)
+    col_edges = _edges(width, n_cols)
+
+    regions: List[Region] = []
+    region_tokens: List[List[int]] = []
+    for r0, r1 in zip(row_edges[:-1], row_edges[1:]):
+        for c0, c1 in zip(col_edges[:-1], col_edges[1:]):
+            regions.append((r0, r1, c0, c1))
+            region_tokens.append([row * width + col for row in range(r0, r1) for col in range(c0, c1)])
+    return regions, region_tokens
+
+
+def _recursive_region_cells(region: Region, budget: int) -> List[Region]:
+    """Split ``region`` into exactly ``budget`` deterministic non-overlapping rectangular cells.
+
+    The largest splittable rectangle is bisected along its longer dimension (rows win dimension ties). This is the
+    paper's within-region cell partition, which guarantees the retained tokens cover the whole region instead of
+    clustering in one corner.
+    """
+    r0, r1, c0, c1 = (int(v) for v in region)
+    target = int(budget)
+    capacity = (r1 - r0) * (c1 - c0)
+    if target < 1 or target > capacity:
+        raise ValueError(f"Cannot form {target} non-empty cells for region={region}")
+
+    cells: List[Region] = [(r0, r1, c0, c1)]
+    while len(cells) < target:
+        candidates = [
+            (-(b - a) * (d - c), index, a, b, c, d)
+            for index, (a, b, c, d) in enumerate(cells)
+            if (b - a) > 1 or (d - c) > 1
+        ]
+        if not candidates:
+            raise RuntimeError(f"Could not split region={region} into {target} cells")
+        _neg_area, index, a, b, c, d = min(candidates)
+        if (b - a) >= (d - c) and (b - a) > 1:
+            midpoint = a + (b - a) // 2
+            children = [(a, midpoint, c, d), (midpoint, b, c, d)]
+        else:
+            midpoint = c + (d - c) // 2
+            children = [(a, b, c, midpoint), (a, b, midpoint, d)]
+        cells[index : index + 1] = children
+    return cells
 
 
 def _laplacian_variation(tokens: torch.Tensor, grid_hw: Tuple[int, int]) -> torch.Tensor:
@@ -147,10 +196,12 @@ def _allocate_budget(scores: List[float], sizes: List[int], budget: int) -> List
 def _select_indices_for_sample(
     sample_tokens: torch.Tensor,
     variation: torch.Tensor,
+    regions: List[Region],
     region_tokens: List[List[int]],
+    grid_w: int,
     budget: int,
 ) -> torch.Tensor:
-    """Pick `budget` token indices for one sample: allocate per region, then keep the most representative tokens."""
+    """Pick `budget` token indices for one sample: allocate per region, then keep one representative per cell."""
     scores = [float(variation[idxs].sum()) for idxs in region_tokens]
     sizes = [len(idxs) for idxs in region_tokens]
     alloc = _allocate_budget(scores, sizes, budget)
@@ -159,13 +210,15 @@ def _select_indices_for_sample(
     for region_idx, keep in enumerate(alloc):
         if keep <= 0:
             continue
-        idxs = region_tokens[region_idx]
-        embeddings = sample_tokens[idxs].float()
-        centroid = embeddings.mean(dim=0, keepdim=True)
-        # Representative == closest to the region centroid (parameter-free ERC proxy).
-        distances = (embeddings - centroid).norm(dim=-1)
-        chosen = torch.topk(distances, k=min(keep, len(idxs)), largest=False).indices
-        selected.extend(int(idxs[c]) for c in chosen.tolist())
+        # Region centroid is the parameter-free ERC proxy: the "most representative" embedding.
+        centroid = sample_tokens[region_tokens[region_idx]].float().mean(dim=0, keepdim=True)
+        # Recursively partition the region into `keep` non-overlapping cells and keep the token closest to the
+        # region centroid within each cell, so kept tokens cover the region rather than clustering in one corner.
+        for r0, r1, c0, c1 in _recursive_region_cells(regions[region_idx], keep):
+            cell_idxs = [row * grid_w + col for row in range(r0, r1) for col in range(c0, c1)]
+            cell_emb = sample_tokens[cell_idxs].float()
+            distances = (cell_emb - centroid).norm(dim=-1)
+            selected.append(int(cell_idxs[int(torch.argmin(distances).item())]))
 
     # Safety net: top up (or trim) to exactly `budget` using global variation ranking.
     if len(selected) < budget:
@@ -212,11 +265,14 @@ def spatially_structured_prune(
         # Unknown / non-square spatial layout (e.g. includes a CLS token) --> skip rather than guess.
         return visual_tokens
 
-    region_tokens, _ = _region_assignment(grid, num_regions_hw)
+    regions, region_tokens = _region_assignment(grid, num_regions_hw)
     variation = _laplacian_variation(visual_tokens, grid)
 
     keep_indices = torch.stack(
-        [_select_indices_for_sample(visual_tokens[b], variation[b], region_tokens, budget) for b in range(bsz)],
+        [
+            _select_indices_for_sample(visual_tokens[b], variation[b], regions, region_tokens, grid[1], budget)
+            for b in range(bsz)
+        ],
         dim=0,
     )
     gather_index = keep_indices.unsqueeze(-1).expand(-1, -1, visual_tokens.shape[-1])

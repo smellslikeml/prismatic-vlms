@@ -230,8 +230,8 @@ vlm.configure_visual_token_pruning(budget=64, num_regions_hw=(2, 2))
 ```
 
 The scheme reserves at least one token per region (spatial coverage), distributes the remaining budget by
-Laplacian variation (more tokens to regions with richer local structure), and keeps the most representative
-tokens within each region. Adapted from
+Laplacian variation (more tokens to regions with richer local structure), and then recursively partitions each
+region into as many cells as it was allocated tokens, keeping one representative token per cell. Adapted from
 [S²Prune: Spatially Structured Visual Token Pruning for Multimodal Large Language Models](https://arxiv.org/abs/2609.01224);
 region density uses the projected patch-embedding grid and a centroid-representativeness proxy stands in for the
 paper's Early Representation Change signal.
