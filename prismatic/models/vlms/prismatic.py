@@ -24,6 +24,7 @@ from prismatic.models.backbones.llm import LLMBackbone
 from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
+from prismatic.models.vlms.token_compression import compress_visual_tokens
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
 
@@ -43,6 +44,8 @@ class PrismaticVLM(VLM):
         llm_backbone: LLMBackbone,
         enable_mixed_precision_training: bool = True,
         arch_specifier: str = "gelu-mlp",
+        scc_similarity_threshold: Optional[float] = None,
+        scc_epsilon: float = 0.05,
     ) -> None:
         super().__init__(
             "prismatic",
@@ -65,6 +68,12 @@ class PrismaticVLM(VLM):
             self.projector = MLPProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
         else:
             raise ValueError(f"PrismaticVLM with `{arch_specifier = }` is not supported!")
+
+        # [LLaVA-Scissor] Optional training-free SCC visual-token compression (disabled unless a threshold is set).
+        #   `scc_epsilon` is the connected-components error-tolerance (approximate-labeling sample size).
+        self.scc_similarity_threshold = scc_similarity_threshold
+        self.scc_epsilon = scc_epsilon
+        self._scc_batch_warned = False
 
         # Trackers
         self.vision_backbone_requires_grad = False
@@ -314,6 +323,19 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+
+        # [LLaVA-Scissor] Optional SCC token compression at the projector boundary. Collapses redundant patch
+        #   tokens into per-semantic-region representatives; only defined for a single visual sequence, so we
+        #   apply it at (batch-size-1) inference and skip -- with a one-time warning -- for larger batches.
+        if self.scc_similarity_threshold is not None:
+            if projected_patch_embeddings.shape[0] == 1:
+                projected_patch_embeddings = self._compress_visual_tokens(
+                    projected_patch_embeddings, self.scc_similarity_threshold, self.scc_epsilon
+                )
+            elif not self._scc_batch_warned:
+                overwatch.warning("SCC token compression is enabled but skipped for batch size > 1.")
+                self._scc_batch_warned = True
+
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(
@@ -420,6 +442,17 @@ class PrismaticVLM(VLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+
+    @staticmethod
+    def _compress_visual_tokens(
+        projected_patch_embeddings: torch.Tensor, similarity_threshold: float, epsilon: float = 0.05
+    ) -> torch.Tensor:
+        """Training-free SCC visual-token compression (LLaVA-Scissor, arXiv:2506.21862).
+
+        Collapses a `[1, N, D]` block of projected patch tokens into `[1, N', D]` semantic-region
+        representatives; see `prismatic.models.vlms.token_compression` for the SCC algorithm.
+        """
+        return compress_visual_tokens(projected_patch_embeddings, similarity_threshold, epsilon)
 
     # === GenerationMixin Methods ===
     #   => Note: The following methods override the functionality of `transformers.GenerationMixin`; these expect the
