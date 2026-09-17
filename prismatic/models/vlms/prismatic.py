@@ -45,6 +45,7 @@ class PrismaticVLM(VLM):
         enable_mixed_precision_training: bool = True,
         arch_specifier: str = "gelu-mlp",
         scc_similarity_threshold: Optional[float] = None,
+        scc_epsilon: float = 0.05,
     ) -> None:
         super().__init__(
             "prismatic",
@@ -69,7 +70,9 @@ class PrismaticVLM(VLM):
             raise ValueError(f"PrismaticVLM with `{arch_specifier = }` is not supported!")
 
         # [LLaVA-Scissor] Optional training-free SCC visual-token compression (disabled unless a threshold is set).
+        #   `scc_epsilon` is the connected-components error-tolerance (approximate-labeling sample size).
         self.scc_similarity_threshold = scc_similarity_threshold
+        self.scc_epsilon = scc_epsilon
         self._scc_batch_warned = False
 
         # Trackers
@@ -327,7 +330,7 @@ class PrismaticVLM(VLM):
         if self.scc_similarity_threshold is not None:
             if projected_patch_embeddings.shape[0] == 1:
                 projected_patch_embeddings = self._compress_visual_tokens(
-                    projected_patch_embeddings, self.scc_similarity_threshold
+                    projected_patch_embeddings, self.scc_similarity_threshold, self.scc_epsilon
                 )
             elif not self._scc_batch_warned:
                 overwatch.warning("SCC token compression is enabled but skipped for batch size > 1.")
@@ -441,13 +444,15 @@ class PrismaticVLM(VLM):
         )
 
     @staticmethod
-    def _compress_visual_tokens(projected_patch_embeddings: torch.Tensor, similarity_threshold: float) -> torch.Tensor:
+    def _compress_visual_tokens(
+        projected_patch_embeddings: torch.Tensor, similarity_threshold: float, epsilon: float = 0.05
+    ) -> torch.Tensor:
         """Training-free SCC visual-token compression (LLaVA-Scissor, arXiv:2506.21862).
 
         Collapses a `[1, N, D]` block of projected patch tokens into `[1, N', D]` semantic-region
         representatives; see `prismatic.models.vlms.token_compression` for the SCC algorithm.
         """
-        return compress_visual_tokens(projected_patch_embeddings, similarity_threshold)
+        return compress_visual_tokens(projected_patch_embeddings, similarity_threshold, epsilon)
 
     # === GenerationMixin Methods ===
     #   => Note: The following methods override the functionality of `transformers.GenerationMixin`; these expect the
