@@ -24,6 +24,7 @@ from prismatic.models.backbones.llm import LLMBackbone
 from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
+from prismatic.models.vlms.visual_token_pruning import prune_visual_tokens
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
 
@@ -43,6 +44,7 @@ class PrismaticVLM(VLM):
         llm_backbone: LLMBackbone,
         enable_mixed_precision_training: bool = True,
         arch_specifier: str = "gelu-mlp",
+        visual_token_pruning: Optional[Dict[str, int]] = None,
     ) -> None:
         super().__init__(
             "prismatic",
@@ -54,6 +56,9 @@ class PrismaticVLM(VLM):
 
         # Set Weight Initialization Seed for Projector Consistency
         torch.manual_seed(vision_backbone.embed_dim)
+
+        # Optional training-free visual-token pruning config (e.g. {"keep_tokens": 128, "region_grid": 4})
+        self.visual_token_pruning = visual_token_pruning
 
         # Initialize Projection (Adapter) based on `arch_specifier`
         self.arch_specifier = arch_specifier
@@ -90,6 +95,7 @@ class PrismaticVLM(VLM):
         llm_backbone: LLMBackbone,
         enable_mixed_precision_training: bool = True,
         arch_specifier: str = "gelu-mlp",
+        visual_token_pruning: Optional[Dict[str, int]] = None,
     ) -> PrismaticVLM:
         """Initialize a PrismaticVLM from a pretrained checkpoint, freezing all weights, tailored for inference."""
         vlm = cls(
@@ -98,6 +104,7 @@ class PrismaticVLM(VLM):
             llm_backbone,
             enable_mixed_precision_training=enable_mixed_precision_training,
             arch_specifier=arch_specifier,
+            visual_token_pruning=visual_token_pruning,
         )
 
         # Load from Checkpoint (Custom --> should load both *projector* and *llm* weights)
@@ -314,6 +321,15 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+
+        # Optional S^2Prune-style visual-token pruning (training-free); downstream fusion resizes automatically
+        if self.visual_token_pruning is not None:
+            projected_patch_embeddings = prune_visual_tokens(
+                projected_patch_embeddings,
+                keep_tokens=self.visual_token_pruning.get("keep_tokens"),
+                region_grid=self.visual_token_pruning.get("region_grid"),
+            )
+
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(
