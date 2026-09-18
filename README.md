@@ -216,3 +216,26 @@ If you find our code or models useful in your work, please cite [our paper](http
   year = {2024},
 }
 ```
+
+---
+
+## Visual Token Pruning (training-free)
+
+`prismatic.models.vlms.visual_token_pruning` provides an opt-in, training-free
+reduction of the projected visual-token block — adapted from
+[S²Prune: Spatially Structured Visual Token Pruning for Multimodal Large Language Models](https://arxiv.org/abs/2609.01224).
+It preserves broad spatial coverage (at least one token per region), then spends
+the remaining token budget where local structure — measured by Laplacian
+variation on the embedding grid — is richest, keeping the most salient token(s)
+inside each region. Enable it by passing a config to `PrismaticVLM`:
+
+```python
+vlm = PrismaticVLM.from_pretrained(
+    checkpoint, model_id, vision_backbone, llm_backbone,
+    visual_token_pruning={"keep_tokens": 128, "region_grid": 4},
+)
+```
+
+The hook runs between the projector and multimodal fusion in `forward()`, so no
+downstream shapes change; leave `visual_token_pruning=None` (the default) to
+disable it.
