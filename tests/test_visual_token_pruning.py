@@ -8,6 +8,7 @@ and its wiring into `PrismaticVLM.forward`.
 import inspect
 import math
 
+import pytest
 import torch
 
 # Import the pruner *through the call-site module* -- this only succeeds if the
@@ -82,9 +83,25 @@ def test_density_follows_structure():
     assert kept_top_left > 1
 
 
-def test_non_square_fallback_keeps_exact_count():
-    # CLS-token / fused layouts can be non-square; the 1-D fallback still applies.
+def test_non_square_grid_rejected():
+    # The reference operates on a square token grid; non-square inputs are rejected.
     embeddings = torch.randn(2, 257, 8)
     assert not math.isqrt(257) ** 2 == 257
-    pruned = prune_visual_tokens(embeddings, keep_tokens=64)
-    assert pruned.shape == (2, 64, 8)
+    with pytest.raises(ValueError):
+        prune_visual_tokens(embeddings, keep_tokens=64, region_grid=4)
+
+
+def test_budget_tied_default_grid():
+    # With no explicit region_grid, the coarse grid is tied to the budget (32 -> 4x4).
+    grid = 16
+    embeddings = torch.randn(1, grid * grid, 8)
+    pruned = prune_visual_tokens(embeddings, keep_tokens=32)
+    assert pruned.shape == (1, 32, 8)
+
+    kept_indices = []
+    for i in range(grid * grid):
+        token = embeddings[0, i]
+        if any(torch.equal(token, pruned[0, j]) for j in range(32)):
+            kept_indices.append(i)
+    covered = {_region_of(i, grid, 4) for i in kept_indices}
+    assert len(covered) == 4 * 4, "budget 32 uses a 4x4 coarse grid with full coverage"

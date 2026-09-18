@@ -327,7 +327,7 @@ class PrismaticVLM(VLM):
             projected_patch_embeddings = prune_visual_tokens(
                 projected_patch_embeddings,
                 keep_tokens=self.visual_token_pruning.get("keep_tokens"),
-                region_grid=self.visual_token_pruning.get("region_grid", 4),
+                region_grid=self.visual_token_pruning.get("region_grid"),
             )
 
         projected_patch_attention_mask = None

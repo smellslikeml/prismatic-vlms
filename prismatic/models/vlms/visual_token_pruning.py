@@ -8,8 +8,10 @@ Large Language Models*, arXiv:2609.01224). The paper's central observation is
 that importance/redundancy-based pruners develop stable spatial biases and often
 fail to beat plain Uniform-Grid sampling -- broad *spatial coverage* is what
 matters. S^2Prune therefore (1) guarantees coverage by keeping at least one token
-per region, (2) spends the remaining budget where local structure is richest, and
-(3) picks representative tokens inside each region.
+per region, (2) spends the remaining budget where local structure is richest via
+capacity-aware largest-remainder apportionment over per-image min-max-normalized
+complexity, and (3) keeps one representative per deterministic local cell so the
+retained tokens stay spatially spread inside each region.
 
 We keep that three-part mechanism at full fidelity while substituting the
 paper's auxiliary components with parameter-free, target-native proxies
@@ -25,6 +27,9 @@ paper's auxiliary components with parameter-free, target-native proxies
     from their neighbourhood carry the most region-specific information).
   * The paper's separate benchmark / evaluation framework is out of scope here.
 
+Like the reference, the pruner operates on a square token grid; the coarse grid
+is tied to the retained-token budget (32->4x4, 64->5x5, 128->8x8, 192->9x9).
+
 The public entry point is :func:`prune_visual_tokens`, which maps a
 ``[bsz, N, D]`` block of projected patch embeddings to ``[bsz, N', D]`` with
 exactly ``N'`` tokens retained per image (batch-consistent, so every downstream
@@ -39,6 +44,21 @@ import torch
 
 __all__ = ["prune_visual_tokens"]
 
+# Paper configuration: the coarse grid is tied to the visual-token budget.
+_DEFAULT_GRIDS = {32: 4, 64: 5, 128: 8, 192: 9}
+_EPS = 1e-12
+
+
+def _default_grid_size(keep_tokens: int) -> int:
+    """Return the paper's coarse-grid side length for a supported budget."""
+    try:
+        return _DEFAULT_GRIDS[int(keep_tokens)]
+    except KeyError as exc:
+        raise ValueError(
+            f"No paper-default coarse grid is defined for keep_tokens={keep_tokens}; "
+            "pass region_grid explicitly."
+        ) from exc
+
 
 def _spatial_structure(tokens: torch.Tensor, grid: int) -> torch.Tensor:
     """Per-token Laplacian variation over a `grid x grid` embedding map -> [N]."""
@@ -52,103 +72,175 @@ def _spatial_structure(tokens: torch.Tensor, grid: int) -> torch.Tensor:
     return laplacian.norm(dim=-1).reshape(-1)
 
 
-def _sequential_structure(tokens: torch.Tensor) -> torch.Tensor:
-    """Fallback 1-D Laplacian variation for non-square token counts -> [N]."""
-    prev = torch.cat([tokens[:1], tokens[:-1]], dim=0)
-    nxt = torch.cat([tokens[1:], tokens[-1:]], dim=0)
-    return ((2.0 * tokens) - prev - nxt).norm(dim=-1)
+def _coarse_regions(grid: int, region_grid: int) -> list[tuple[int, int, int, int]]:
+    """Partition a `grid x grid` token map into near-equal non-overlapping rectangles.
+
+    Boundaries use ``round(i * grid / parts)`` exactly as in the reference, so the
+    coarse regions tile the grid once with no gaps or overlaps.
+    """
+    edges = [round(i * grid / region_grid) for i in range(region_grid + 1)]
+    regions: list[tuple[int, int, int, int]] = []
+    for row in range(region_grid):
+        for col in range(region_grid):
+            r0, r1 = edges[row], edges[row + 1]
+            c0, c1 = edges[col], edges[col + 1]
+            if r1 > r0 and c1 > c0:
+                regions.append((r0, r1, c0, c1))
+    return regions
 
 
-def _region_ids(num_tokens: int, grid: int, region_grid: int, square: bool, device: torch.device) -> torch.Tensor:
-    """Assign every token to one of (region_grid x region_grid) coverage regions -> [N]."""
-    if square:
-        rows = torch.arange(grid, device=device)
-        row_region = (rows * region_grid) // grid
-        col_region = (rows * region_grid) // grid
-        ids = row_region[:, None] * region_grid + col_region[None, :]
-        return ids.reshape(-1)
-
-    # Non-square fallback: contiguous 1-D bins preserve positional coverage.
-    positions = torch.arange(num_tokens, device=device)
-    return (positions * (region_grid * region_grid)) // num_tokens
+def _min_max_normalize(scores: list[float]) -> list[float]:
+    """Per-image min-max normalization of the region complexity scores."""
+    lo, hi = min(scores), max(scores)
+    denom = max(hi - lo, _EPS)
+    return [(s - lo) / denom for s in scores]
 
 
-def _allocate_budget(region_scores: list[float], region_capacity: list[int], keep_tokens: int) -> list[int]:
-    """Coverage-first, structure-weighted apportionment respecting per-region capacity.
+def _largest_remainder_allocation(
+    region_scores: list[float], region_sizes: list[int], keep_tokens: int, minimum: int = 1
+) -> list[int]:
+    """Capacity-aware largest-remainder (Hamilton) apportionment of the budget.
 
-    Every region with capacity receives one token first (spatial coverage); the
-    remainder is handed out one token at a time by a highest-averages rule
-    (priority = structure_score / (current_alloc + 1)), which spends budget where
-    Laplacian variation is greatest while never exceeding a region's token count.
+    Every region receives ``minimum`` tokens first (spatial coverage); the
+    remainder is distributed proportionally to structural complexity via capped
+    largest fractional remainders, never exceeding a region's token count. This
+    matches the reference allocator exactly.
     """
     num_regions = len(region_scores)
-    alloc = [0] * num_regions
+    if keep_tokens < minimum * num_regions or keep_tokens > sum(region_sizes):
+        raise ValueError(
+            f"keep_tokens={keep_tokens} is infeasible for {num_regions} regions with "
+            f"minimum={minimum}"
+        )
 
-    coverable = [r for r in range(num_regions) if region_capacity[r] > 0]
-    remaining = keep_tokens
-    if keep_tokens >= len(coverable):
-        for r in coverable:
-            alloc[r] = 1
-            remaining -= 1
-
+    alloc = [minimum] * num_regions
+    remaining = keep_tokens - minimum * num_regions
     while remaining > 0:
-        best, best_priority = -1, -math.inf
-        for r in range(num_regions):
-            if alloc[r] >= region_capacity[r]:
-                continue
-            priority = region_scores[r] / (alloc[r] + 1)
-            if priority > best_priority:
-                best, best_priority = r, priority
-        if best < 0:
+        available = [region_sizes[i] - alloc[i] for i in range(num_regions)]
+        eligible = [i for i in range(num_regions) if available[i] > 0]
+        weights = [region_scores[i] for i in eligible]
+        total = sum(weights)
+        if total <= _EPS:
+            weights = [1.0] * len(eligible)
+            total = float(len(eligible))
+
+        quotas = {i: w / total * remaining for i, w in zip(eligible, weights)}
+        added = 0
+        for i in eligible:
+            gain = min(int(math.floor(quotas[i])), region_sizes[i] - alloc[i])
+            alloc[i] += gain
+            added += gain
+        remaining -= added
+        if remaining == 0:
             break
-        alloc[best] += 1
-        remaining -= 1
+
+        fractions = {i: quotas[i] - math.floor(quotas[i]) for i in eligible}
+        order = sorted(
+            (i for i in range(num_regions) if region_sizes[i] - alloc[i] > 0),
+            key=lambda i: (fractions.get(i, 0.0), region_scores[i], -i),
+            reverse=True,
+        )
+        for i in order:
+            if remaining == 0:
+                break
+            if alloc[i] < region_sizes[i]:
+                alloc[i] += 1
+                remaining -= 1
 
     return alloc
 
 
+def _recursive_region_cells(
+    region: tuple[int, int, int, int], budget: int
+) -> list[tuple[int, int, int, int]]:
+    """Split a region into exactly ``budget`` deterministic rectangular cells.
+
+    The largest splittable rectangle is bisected along its longer dimension.
+    Rows win dimension ties, and integer floor midpoints produce floor/ceil
+    children when a side length is odd. Guarantees intra-region spatial spread.
+    """
+    r0, r1, c0, c1 = region
+    capacity = (r1 - r0) * (c1 - c0)
+    if budget < 1 or budget > capacity:
+        raise ValueError(f"Cannot form {budget} non-empty cells for region={region}")
+
+    cells: list[tuple[int, int, int, int]] = [(r0, r1, c0, c1)]
+    while len(cells) < budget:
+        candidates = [
+            (-(b - a) * (d - c), index, a, b, c, d)
+            for index, (a, b, c, d) in enumerate(cells)
+            if (b - a) > 1 or (d - c) > 1
+        ]
+        _negative_area, index, a, b, c, d = min(candidates)
+        if (b - a) >= (d - c) and (b - a) > 1:
+            midpoint = a + (b - a) // 2
+            children = [(a, midpoint, c, d), (midpoint, b, c, d)]
+        else:
+            midpoint = c + (d - c) // 2
+            children = [(a, b, c, midpoint), (a, b, midpoint, d)]
+        cells[index : index + 1] = children
+    return cells
+
+
 def _select_indices(
-    tokens: torch.Tensor, region_ids: torch.Tensor, structure: torch.Tensor, keep_tokens: int
+    tokens: torch.Tensor,
+    grid: int,
+    structure: torch.Tensor,
+    regions: list[tuple[int, int, int, int]],
+    keep_tokens: int,
 ) -> torch.Tensor:
     """Pick `keep_tokens` retained token indices (sorted, original order preserved)."""
-    num_regions = int(region_ids.max().item()) + 1
-    region_scores, region_capacity, region_members = [], [], []
-    for r in range(num_regions):
-        members = torch.nonzero(region_ids == r, as_tuple=False).reshape(-1)
-        region_members.append(members)
-        region_capacity.append(int(members.numel()))
-        region_scores.append(float(structure[members].sum().item()) if members.numel() else 0.0)
+    device = tokens.device
+    region_flat, region_scores, region_sizes = [], [], []
+    for r0, r1, c0, c1 in regions:
+        rows = torch.arange(r0, r1, device=device)
+        cols = torch.arange(c0, c1, device=device)
+        idx = (rows[:, None] * grid + cols[None, :]).reshape(-1)
+        region_flat.append(idx)
+        region_sizes.append(int(idx.numel()))
+        region_scores.append(float(structure.index_select(0, idx).sum().item()))
 
-    alloc = _allocate_budget(region_scores, region_capacity, keep_tokens)
+    normalized = _min_max_normalize(region_scores)
+    alloc = _largest_remainder_allocation(normalized, region_sizes, keep_tokens)
 
     selected = []
-    for r in range(num_regions):
-        take = alloc[r]
-        members = region_members[r]
-        if take <= 0 or members.numel() == 0:
+    for region, take, idx in zip(regions, alloc, region_flat):
+        if take <= 0:
             continue
-        if take >= members.numel():
-            selected.append(members)
+        if take >= idx.numel():
+            selected.append(idx)
             continue
-        # Saliency proxy for ERC: distance from the region centroid.
-        centroid = tokens[members].mean(dim=0, keepdim=True)
-        saliency = (tokens[members] - centroid).norm(dim=-1)
-        top = torch.topk(saliency, take).indices
-        selected.append(members[top])
+        r0, _r1, c0, c1 = region
+        width = c1 - c0
+        # Saliency proxy for ERC: distance from the region centroid, aligned to `idx`.
+        centroid = tokens.index_select(0, idx).mean(dim=0, keepdim=True)
+        saliency = (tokens.index_select(0, idx) - centroid).norm(dim=-1)
+        # Keep the most salient token in each deterministic non-overlapping cell.
+        for a, b, c, d in _recursive_region_cells(region, take):
+            prows = torch.arange(a - r0, b - r0, device=device)
+            pcols = torch.arange(c - c0, d - c0, device=device)
+            positions = (prows[:, None] * width + pcols[None, :]).reshape(-1)
+            best = positions[int(torch.argmax(saliency.index_select(0, positions)).item())]
+            selected.append(idx[best].reshape(1))
 
-    keep_idx = torch.cat(selected) if selected else torch.arange(keep_tokens, device=tokens.device)
+    keep_idx = torch.cat(selected) if selected else torch.arange(keep_tokens, device=device)
     return torch.sort(keep_idx).values
 
 
-def prune_visual_tokens(patch_embeddings: torch.Tensor, keep_tokens: int, region_grid: int = 4) -> torch.Tensor:
+def prune_visual_tokens(
+    patch_embeddings: torch.Tensor, keep_tokens: int, region_grid: int | None = None
+) -> torch.Tensor:
     """Spatially structured, training-free pruning of projected visual tokens.
 
     Args:
-        patch_embeddings: Projected patch embeddings, shape ``[bsz, N, D]``.
+        patch_embeddings: Projected patch embeddings, shape ``[bsz, N, D]``. ``N``
+            must be a perfect square (the reference operates on a square token grid).
         keep_tokens: Number of visual tokens to retain per image. A no-op when
             ``keep_tokens`` is falsy, ``<= 0``, or ``>= N``.
-        region_grid: Side length of the coverage-region grid (``region_grid**2``
-            regions). Clamped so it never exceeds the token grid resolution.
+        region_grid: Side length of the coarse-region grid (``region_grid**2``
+            regions). Defaults to the paper's budget-tied configuration
+            (32->4, 64->5, 128->8, 192->9); pass a value to override. Clamped so it
+            never exceeds the token grid resolution.
 
     Returns:
         Pruned embeddings of shape ``[bsz, keep_tokens, D]`` (unchanged input when
@@ -163,15 +255,21 @@ def prune_visual_tokens(patch_embeddings: torch.Tensor, keep_tokens: int, region
         return patch_embeddings
 
     grid = int(math.isqrt(num_tokens))
-    square = grid * grid == num_tokens
-    effective_grid = max(1, min(region_grid, grid)) if square else max(1, region_grid)
-    region_ids = _region_ids(num_tokens, grid, effective_grid, square, patch_embeddings.device)
+    if grid * grid != num_tokens:
+        raise ValueError(
+            f"S^2Prune requires a square visual-token grid; got {num_tokens} tokens"
+        )
+
+    if region_grid is None:
+        region_grid = _default_grid_size(keep_tokens)
+    effective_grid = max(1, min(int(region_grid), grid))
+    regions = _coarse_regions(grid, effective_grid)
 
     pruned = []
     for b in range(bsz):
         tokens = patch_embeddings[b]
-        structure = _spatial_structure(tokens, grid) if square else _sequential_structure(tokens)
-        keep_idx = _select_indices(tokens, region_ids, structure, keep_tokens)
+        structure = _spatial_structure(tokens, grid)
+        keep_idx = _select_indices(tokens, grid, structure, regions, keep_tokens)
         pruned.append(tokens.index_select(0, keep_idx))
 
     return torch.stack(pruned, dim=0)
