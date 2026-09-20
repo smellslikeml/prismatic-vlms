@@ -216,3 +216,28 @@ If you find our code or models useful in your work, please cite [our paper](http
   year = {2024},
 }
 ```
+
+---
+
+#### Verbose Prompt Framing (Robustness under Image Corruption)
+
+Adapted from [*Cross-Modal Attention Acts as a Frequency Filter: Why Verbose Prompts
+Improve Robustness in Vision-Language Models*](https://arxiv.org/abs/2609.20139).
+
+The paper shows that padding a question with a short, content-free verbose preamble
+(e.g. `"Is there a cat?"` → `"Please look carefully and answer: is there a cat?"`)
+broadens the frequency support of question-conditioned cross-modal attention and
+reduces answer drift under image corruption. `get_prompt_builder` exposes this as an
+opt-in flag that composes the framing into each family prompter's `wrap_human` step —
+no change to the forward/generate path:
+
+```python
+# Verbose-frame every human question to improve robustness under corruption.
+prompt_builder = vlm.get_prompt_builder(verbose_framing=True)
+prompt_builder.add_turn(role="human", message="Is there a cat?")
+prompt_text = prompt_builder.get_prompt()
+```
+
+Only the practical "pad the prompt" recipe is implemented here; the paper's spectral
+analysis, drift-variance measurement, and corruption-benchmark suite are left to a
+downstream evaluation.

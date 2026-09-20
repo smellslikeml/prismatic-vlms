@@ -22,6 +22,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from prismatic.models.backbones.llm import LLMBackbone
 from prismatic.models.backbones.llm.prompting import PromptBuilder
+from prismatic.models.backbones.llm.prompting.verbose_framing import apply_verbose_framing
 from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
@@ -115,9 +116,17 @@ class PrismaticVLM(VLM):
 
         return vlm
 
-    def get_prompt_builder(self, system_prompt: Optional[str] = None) -> PromptBuilder:
+    def get_prompt_builder(self, system_prompt: Optional[str] = None, verbose_framing: bool = False) -> PromptBuilder:
         prompt_initializer: Type[PromptBuilder] = self.llm_backbone.prompt_builder_fn
-        return prompt_initializer(self.model_family, system_prompt=system_prompt)
+        prompt_builder = prompt_initializer(self.model_family, system_prompt=system_prompt)
+
+        # Opt-in "pad the prompt" recipe (arXiv:2609.20139): verbose-frame each human
+        # question to broaden cross-modal attention's frequency support and reduce answer
+        # drift under image corruption. No-op on the forward/generate path.
+        if verbose_framing:
+            apply_verbose_framing(prompt_builder)
+
+        return prompt_builder
 
     def freeze_backbones(self, stage: str) -> None:
         """
