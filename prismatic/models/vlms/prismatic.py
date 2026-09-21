@@ -25,6 +25,7 @@ from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
+from prismatic.util.fusion_projectors import PostAdaptationFusionProjector
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
@@ -59,6 +60,11 @@ class PrismaticVLM(VLM):
         self.arch_specifier = arch_specifier
         if arch_specifier == "linear":
             self.projector = LinearProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
+        elif arch_specifier.endswith("fused-interleave-gelu-mlp"):
+            # LEO-style post-adaptation fusion: independent per-encoder adapters + sequence-level (interleaved) fusion,
+            # in place of the default channel-concat + single FusedMLPProjector for mixture-of-encoders backbones.
+            encoder_dims = getattr(vision_backbone, "encoder_dims", [vision_backbone.embed_dim])
+            self.projector = PostAdaptationFusionProjector(encoder_dims, llm_backbone.embed_dim)
         elif arch_specifier.endswith("fused-gelu-mlp"):
             self.projector = FusedMLPProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
         elif arch_specifier.endswith("gelu-mlp"):
@@ -231,7 +237,7 @@ class PrismaticVLM(VLM):
         # Get Prismatic Wrapping Policy =>> just a module wrapping policy around `self.projector`
         prismatic_fsdp_wrapping_policy = partial(
             _module_wrap_policy,
-            module_classes={LinearProjector, MLPProjector, FusedMLPProjector},
+            module_classes={LinearProjector, MLPProjector, FusedMLPProjector, PostAdaptationFusionProjector},
         )
 
         # Return union (_or_) over constituent policies
