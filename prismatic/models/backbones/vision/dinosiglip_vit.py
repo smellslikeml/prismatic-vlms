@@ -155,6 +155,11 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         return self.dino_featurizer.embed_dim + self.siglip_featurizer.embed_dim
 
     @property
+    def encoder_dims(self) -> Tuple[int, int]:
+        """Per-encoder patch feature dims (order matches the channel-concat in `forward`) for post-adaptation fusion."""
+        return self.dino_featurizer.embed_dim, self.siglip_featurizer.embed_dim
+
+    @property
     def num_patches(self) -> int:
         assert self.dino_featurizer.patch_embed.num_patches == self.siglip_featurizer.patch_embed.num_patches
         return self.dino_featurizer.patch_embed.num_patches
