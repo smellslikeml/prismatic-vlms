@@ -216,3 +216,25 @@ If you find our code or models useful in your work, please cite [our paper](http
   year = {2024},
 }
 ```
+
+---
+
+## Efficient Inference — Sample-Adaptive Vision-Token Pruning
+
+Vision tokens dominate the sequence length (and therefore the inference cost) of a Prismatic VLM. As an optional,
+training-free efficiency stage, you can prune the projected patch tokens *before* they are concatenated into the LLM
+input, with the strategy chosen adaptively per sample:
+
+```python
+vlm = load("prism-dinosiglip+7b")
+vlm.enable_vision_token_pruning(reduction_ratio=0.5)  # drop ~50% of vision tokens; off by default
+```
+
+The pruner (`prismatic/util/token_pruning.py`) routes each image among a small pool of candidate pruning strategies
+(uniform/stride, salience-by-norm, redundancy-diversity) using low-cost visual statistics, and retains full-token
+inference when pruning is predicted to be unfavorable. It adds no trainable weights and preserves the
+`projected_patch_embeddings.shape[1]` contract, so no downstream mask/label/padding code changes.
+
+Sample-adaptive strategy routing is adapted from *Beyond One-Size-Fits-All: Sample-Adaptive Strategy Routing for
+Vision Token Pruning in MLLMs* (VIP-Router, [arXiv:2609.10346](https://arxiv.org/abs/2609.10346)); here the paper's
+learned router is substituted with a parameter-free proxy over visual token statistics.

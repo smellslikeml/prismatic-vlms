@@ -26,6 +26,7 @@ from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
+from prismatic.util.token_pruning import VisionTokenRouter
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -66,6 +67,9 @@ class PrismaticVLM(VLM):
         else:
             raise ValueError(f"PrismaticVLM with `{arch_specifier = }` is not supported!")
 
+        # Optional, opt-in sample-adaptive vision-token pruner (see `enable_vision_token_pruning`); off by default.
+        self.vision_token_router: Optional[VisionTokenRouter] = None
+
         # Trackers
         self.vision_backbone_requires_grad = False
 
@@ -80,6 +84,14 @@ class PrismaticVLM(VLM):
             token_idx_list = self.llm_backbone.tokenizer.encode(trigger_string, add_special_tokens=False)
             assert len(token_idx_list) == 1, f'String "{trigger_string}" is tokenized as more than one token!'
             self.string2idx[trigger_string] = token_idx_list[0]
+
+    def enable_vision_token_pruning(self, reduction_ratio: float = 0.5, **router_kwargs: float) -> None:
+        """Attach a training-free, sample-adaptive vision-token pruner to the projected-patch call site.
+
+        Plug-and-play: adds no trainable weights and can be toggled off again by setting
+        `self.vision_token_router = None`. See `prismatic.util.token_pruning.VisionTokenRouter`.
+        """
+        self.vision_token_router = VisionTokenRouter(reduction_ratio=reduction_ratio, **router_kwargs)
 
     @classmethod
     def from_pretrained(
@@ -314,6 +326,13 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+
+        # Optional sample-adaptive vision-token pruning :: [bsz, num_patches, d] -> [bsz, num_patches', d]
+        #   => All downstream mask/label/padding paths key on `projected_patch_embeddings.shape[1]`, so shrinking
+        #      the patch count here is contract-preserving.
+        if self.vision_token_router is not None:
+            projected_patch_embeddings = self.vision_token_router(projected_patch_embeddings)
+
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(
